@@ -66,7 +66,19 @@ if st.button("保存する"):
                     image_files = glob.glob(os.path.join(target_dir, "*.jpg"))
                     
                     if image_files:
-                        st.image(image_files[0], caption="Preview (Local)", use_container_width=True)
+                        st.subheader("ダウンロードはこちら 👇")
+                        for i, img_path in enumerate(image_files):
+                            st.image(img_path, caption=f"Image {i+1}", use_container_width=True)
+                            
+                            # 画像ファイルをバイト列として読み込む
+                            with open(img_path, "rb") as file:
+                                btn = st.download_button(
+                                    label=f"画像 {i+1} を保存",
+                                    data=file,
+                                    file_name=os.path.basename(img_path),
+                                    mime="image/jpeg",
+                                    key=f"download-btn-{i}"
+                                )
                     else:
                         # 万が一ローカルファイルが見つからない場合はリモートURLを表示（以前の挙動）
                         st.image(post.url, caption="Preview (Remote - May fail)", use_container_width=True)
