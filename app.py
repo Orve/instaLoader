@@ -2,18 +2,26 @@ import streamlit as st
 import instaloader
 import re
 import os
+import shutil
 
-# ページ設定（ちょっとオシャレに）
-st.set_page_config(page_title="Insta Saver", page_icon="📸")
+# ページ設定（スマホで見やすいように）
+st.set_page_config(page_title="Insta Saver", page_icon="📸", layout="centered")
 
-st.title("📸 Insta Saver (Minimal)")
-st.write("保存したい投稿のURLを貼ってね。")
+# スマホ向けのCSS調整（画像の余白とかを調整して見やすくするおまじない）
+st.markdown("""
+    <style>
+        .stImage { margin-bottom: 20px; }
+        .stButton button { width: 100%; border-radius: 20px; font-weight: bold; }
+    </style>
+""", unsafe_allow_html=True)
 
-# 保存先ディレクトリの準備
+st.title("📸 Insta Saver")
+st.caption("気に入った画像は **長押し** して保存してね👇")
+
+# 保存先ディレクトリ
 DOWNLOAD_DIR = "downloads"
-os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Instaloaderのインスタンス化
+# Instaloader初期化
 L = instaloader.Instaloader(
     download_pictures=True,
     download_videos=False, 
@@ -24,32 +32,39 @@ L = instaloader.Instaloader(
     compress_json=False
 )
 
-# URL入力欄
-url = st.text_input("Instagram Post URL", placeholder="https://www.instagram.com/p/...")
+# URL入力
+url = st.text_input("URL", placeholder="https://www.instagram.com/p/...")
 
 def get_shortcode(url):
-    """URLからショートコード（ID部分）を抽出する"""
     match = re.search(r'instagram\.com/p/([^/]+)', url)
     return match.group(1) if match else None
 
-if st.button("保存する"):
-    if not url:
-        st.warning("URLを入力してね🥺")
-    else:
+# エンターキーでも反応するようにフォーム化
+with st.form("save_form"):
+    submitted = st.form_submit_button("画像を表示する 🔍")
+
+    if submitted and url:
         shortcode = get_shortcode(url)
         if not shortcode:
-            st.error("URLの形式が違うみたい… 'instagram.com/p/...' の形式か確認してみて。")
+            st.error("URLを確認してね🥺")
         else:
             try:
-                with st.spinner('画像を探しています...'):
-                    # 投稿データを取得
+                # ターゲットディレクトリ設定
+                # os.makedirs(DOWNLOAD_DIR, exist_ok=True) # ここはループ外でやるべきだが、都度確認でもOK
+                if not os.path.exists(DOWNLOAD_DIR):
+                    os.makedirs(DOWNLOAD_DIR)
+
+                target_dir = os.path.join(DOWNLOAD_DIR, shortcode)
+                
+                # 既存のキャッシュがあれば消す（常に最新を取得）
+                if os.path.exists(target_dir):
+                    shutil.rmtree(target_dir)
+                
+                with st.spinner('画像を読み込んでるよ...'):
                     post = instaloader.Post.from_shortcode(L.context, shortcode)
                     
-                    # ターゲットディレクトリ（ID名）
-                    target_dir = os.path.join(DOWNLOAD_DIR, shortcode)
-                    
                     # Instaloaderのダウンロード実行
-                    # target引数にパスを含めると誤動作するため、一時的にディレクトリ移動
+                    # target引数にパスを含めると誤動作するため、一時的にディレクトリ移動（バグ修正済ロジック）
                     current_dir = os.getcwd()
                     try:
                         os.chdir(DOWNLOAD_DIR)
@@ -57,32 +72,28 @@ if st.button("保存する"):
                     finally:
                         os.chdir(current_dir)
                     
-                    st.success(f"保存完了！✨")
-                    st.caption(f"保存先: {target_dir}")
-                    
-                    # プレビュー表示（ローカル画像を使用）
-                    # InstagramのCDNリンクは直接開けない場合があるため、保存したファイルを表示
-                    import glob
-                    image_files = glob.glob(os.path.join(target_dir, "*.jpg"))
-                    
-                    if image_files:
-                        st.subheader("ダウンロードはこちら 👇")
-                        for i, img_path in enumerate(image_files):
-                            st.image(img_path, caption=f"Image {i+1}", use_container_width=True)
-                            
-                            # 画像ファイルをバイト列として読み込む
-                            with open(img_path, "rb") as file:
-                                btn = st.download_button(
-                                    label=f"画像 {i+1} を保存",
-                                    data=file,
-                                    file_name=os.path.basename(img_path),
-                                    mime="image/jpeg",
-                                    key=f"download-btn-{i}"
-                                )
+                    # 画像ファイルを取得してソート
+                    images = sorted(
+                        [f for f in os.listdir(target_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
+                    )
+
+                    if not images:
+                        st.warning("画像が見つからなかった…動画のみかも？")
                     else:
-                        # 万が一ローカルファイルが見つからない場合はリモートURLを表示（以前の挙動）
-                        st.image(post.url, caption="Preview (Remote - May fail)", use_container_width=True)
+                        st.success(f"{len(images)}枚の画像を見つけたよ✨")
+                        st.divider() # 区切り線
+                        
+                        # 画像をループ表示
+                        for img_file in images:
+                            img_path = os.path.join(target_dir, img_file)
+                            
+                            # widthを指定せず use_container_width=True にすると
+                            # スマホの画面幅いっぱいに表示されてリッチに見えるよ
+                            st.image(img_path, use_container_width=True)
+                            
+                            # 画像間の余白（スペーサー）
+                            st.write("") 
+                            st.write("")
 
             except Exception as e:
-                st.error(f"エラーが発生しちゃった: {e}")
-                st.info("※非公開アカウントや、ログインが必要な投稿は取得できない場合があります。")
+                st.error(f"エラー: {e}")
