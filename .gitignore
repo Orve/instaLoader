@@ -1,17 +1,5 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Streamlit
-.streamlit/
+downloads
+instaDownloader
+__pycache__
+.streamlit
 *.pyc
-
-# Instaloader downloads
-downloads/
-instaDownloader/
-*.session
-
-# OS specific
-.DS_Store
-Thumbs.db
