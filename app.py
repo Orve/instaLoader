@@ -64,7 +64,8 @@ def handle_message(event):
             # ここでは直接APIを叩いて結果を返す
             
             # --- RapidAPI呼び出しロジック ---
-            url = f"https://{RAPID_API_HOST}/index"
+            # APIの仕様変更に合わせてエンドポイントを /download に変更
+            url = f"https://{RAPID_API_HOST}/download"
             querystring = {"url": text}
             headers = {
                 "X-RapidAPI-Key": RAPID_API_KEY,
