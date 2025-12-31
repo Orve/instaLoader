@@ -79,46 +79,53 @@ def handle_message(event):
             data = response.json()
             logger.info(f"RapidAPI Response: {data}")
 
-            # --- レスポンス解析 (APIの仕様に合わせて調整してください) ---
-            # APIによってレスポンス構造が異なります。
-            # 例1: {"media": "https://..."}
-            # 例2: [{"url": "https://..."}]
-            # 例3: {"results": [{"url": "https://..."}]}
-            
+            # --- レスポンス解析 (APIの仕様に合わせて調整) ---
             media_url = None
             preview_url = None
             is_video = False
 
-            # 以下は一般的な構造を想定した探索ロジックです
-            if isinstance(data, dict):
-                if 'media' in data:
-                    media_url = data['media']
-                elif 'download_url' in data:
-                    media_url = data['download_url']
-                elif 'results' in data and isinstance(data['results'], list) and data['results']:
-                    media_url = data['results'][0].get('url')
-            elif isinstance(data, list) and len(data) > 0:
-                media_url = data[0].get('url')
+            # 様々なパターンを探索
+            def find_url(obj):
+                if isinstance(obj, dict):
+                    # よくあるキー名を優先探索
+                    for key in ['url', 'video_url', 'download_url', 'media']:
+                        if key in obj and isinstance(obj[key], str) and obj[key].startswith('http'):
+                            return obj[key]
+                    # ネストされている場合（body, data, resultsなど）
+                    for key in ['body', 'data', 'results', 'items', '0']:
+                        if key in obj:
+                            res = find_url(obj[key])
+                            if res: return res
+                elif isinstance(obj, list) and len(obj) > 0:
+                    for item in obj:
+                        res = find_url(item)
+                        if res: return res
+                return None
+
+            media_url = find_url(data)
 
             # メディアURLが見つからなかった場合
             if not media_url:
+                logger.error(f"Media URL extraction failed. Response data: {json.dumps(data)}")
                 line_bot_api.reply_message(
                     event.reply_token,
-                    TextSendMessage(text="メディアURLを取得できませんでした😢")
+                    TextSendMessage(text=f"メディアURLが見つかりませんでした😢\n解析不能なレスポンスです。")
                 )
                 return
 
-            # 動画か画像かの判定（簡易的）
-            if ".mp4" in media_url:
+            # 動画か画像かの判定
+            if ".mp4" in media_url or "video" in str(data).lower():
                 is_video = True
             
-            # プレビュー画像のURL（動画の場合は必須）
-            # APIがサムネイルを返さない場合は、適当な画像か動画URLそのものを指定（LINE仕様による）
-            preview_url = data.get('thumbnail') or media_url 
-            if is_video and not data.get('thumbnail'):
-                 # 動画の場合、プレビューに動画URLを指定しても表示されない場合があるため
-                 # 本来はサムネイルが必要だが、今回は簡易的に設定
-                 preview_url = "https://via.placeholder.com/1024x1024?text=Video"
+            # プレビュー画像のURL
+            # json内からサムネイルを探す、なければプレースホルダー
+            preview_url = find_url({k: v for k, v in data.items() if 'thumb' in k or 'cover' in k})
+            if not preview_url:
+                # 動画の場合はメディアURLをそのまま使ってみる（LINEが自動取得してくれることに期待）
+                # ※本来は静止画URL必須
+                 preview_url = "https://via.placeholder.com/1024x1024.png?text=No+Preview" if is_video else media_url
+
+            logger.info(f"Extracted Media URL: {media_url}")
 
             # --- LINEへの返信 ---
             if is_video:
