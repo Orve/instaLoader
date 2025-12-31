@@ -87,11 +87,20 @@ def handle_message(event):
             # 様々なパターンを探索
             def find_url(obj):
                 if isinstance(obj, dict):
-                    # よくあるキー名を優先探索
-                    for key in ['url', 'video_url', 'download_url', 'media']:
+                    # パターンA: このAPI特有の 'medias' リストがある場合（ここが本命）
+                    if 'medias' in obj and isinstance(obj['medias'], list) and len(obj['medias']) > 0:
+                        return find_url(obj['medias'][0])
+
+                    # パターンB: キー名探索
+                    # 'url' は投稿ページ自体のURLが入っていることがあるので優先度を下げる
+                    for key in ['video_url', 'download_url', 'media', 'url']:
                         if key in obj and isinstance(obj[key], str) and obj[key].startswith('http'):
+                            # ★重要: Instagramの投稿URLそのもの（HTML）は除外する
+                            if "instagram.com/p/" in obj[key] or "instagram.com/reel/" in obj[key]:
+                                continue
                             return obj[key]
-                    # ネストされている場合（body, data, resultsなど）
+
+                    # パターンC: ネストされている場合（body, data, resultsなど）
                     for key in ['body', 'data', 'results', 'items', '0']:
                         if key in obj:
                             res = find_url(obj[key])
