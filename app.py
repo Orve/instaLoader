@@ -1,106 +1,153 @@
-import streamlit as st
-import instaloader
-import re
 import os
-import shutil
-
-# ページ設定
-st.set_page_config(page_title="Insta Saver", page_icon="📸", layout="centered")
-
-# スマホ向けのCSS調整
-st.markdown("""
-    <style>
-        .stImage { margin-bottom: 20px; }
-        .stButton button { width: 100%; border-radius: 20px; font-weight: bold; }
-    </style>
-""", unsafe_allow_html=True)
-
-st.title("📸 Insta Saver")
-st.caption("気に入った画像は **長押し** して保存してね👇")
-
-# 保存先ディレクトリ
-DOWNLOAD_DIR = "downloads"
-
-# Instaloader初期化（User-Agent偽装）
-# iPhoneの公式アプリからのアクセスに見せかける
-USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 15_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 239.2.0.17.109'
-
-L = instaloader.Instaloader(
-    download_pictures=True,
-    download_videos=False, 
-    download_video_thumbnails=False,
-    download_geotags=False, 
-    download_comments=False, 
-    save_metadata=False,
-    compress_json=False,
-    user_agent=USER_AGENT  # ここでUser-Agentを指定
+import sys
+import json
+import logging
+import requests
+from flask import Flask, request, abort
+from linebot import LineBotApi, WebhookHandler
+from linebot.exceptions import InvalidSignatureError
+from linebot.models import (
+    MessageEvent, TextMessage, TextSendMessage, ImageSendMessage, VideoSendMessage
 )
 
-# URL入力
-url = st.text_input("URL", placeholder="https://www.instagram.com/p/...")
+# ログ設定
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def get_shortcode(url):
-    match = re.search(r'instagram\.com/p/([^/]+)', url)
-    return match.group(1) if match else None
+app = Flask(__name__)
 
-# エンターキーでも反応するようにフォーム化
-with st.form("save_form"):
-    submitted = st.form_submit_button("画像を表示する �")
+# --- 環境変数の読み込み ---
+# Renderなどのホスティングサービスで環境変数を設定してください
+CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
+CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
+RAPID_API_KEY = os.environ.get('RAPID_API_KEY')
+RAPID_API_HOST = os.environ.get('RAPID_API_HOST', 'instagram-downloader-download-instagram-videos-stories.p.rapidapi.com')
 
-    if submitted and url:
-        shortcode = get_shortcode(url)
-        if not shortcode:
-            st.error("URLを確認してね🥺")
-        else:
-            try:
-                # ターゲットディレクトリ設定
-                if not os.path.exists(DOWNLOAD_DIR):
-                    os.makedirs(DOWNLOAD_DIR)
+if not CHANNEL_ACCESS_TOKEN or not CHANNEL_SECRET:
+    logger.error("LINE_CHANNEL_ACCESS_TOKEN or LINE_CHANNEL_SECRET is not set.")
+    # 起動時に環境変数がない場合はエラーにするか、あるいはデプロイ後の設定待ちとして走らせるか
+    # ここではログを出して続行
 
-                target_dir = os.path.join(DOWNLOAD_DIR, shortcode)
-                
-                # 既存のキャッシュがあれば消す（常に最新を取得）
-                if os.path.exists(target_dir):
-                    shutil.rmtree(target_dir)
-                
-                with st.spinner('画像を読み込んでるよ...'):
-                    # 取得処理
-                    post = instaloader.Post.from_shortcode(L.context, shortcode)
-                    
-                    # 保存処理（ディレクトリ移動ハック）
-                    current_dir = os.getcwd()
-                    try:
-                        os.chdir(DOWNLOAD_DIR)
-                        L.download_post(post, target=shortcode)
-                    finally:
-                        os.chdir(current_dir)
-                    
-                    # 画像ファイルを取得してソート
-                    images = sorted(
-                        [f for f in os.listdir(target_dir) if f.endswith(('.jpg', '.png', '.jpeg'))]
+line_bot_api = LineBotApi(CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(CHANNEL_SECRET)
+
+@app.route("/")
+def health_check():
+    """Render等がサービスをKillしないためのヘルスチェック用エンドポイント"""
+    return "Bot is alive", 200
+
+@app.route("/callback", methods=['POST'])
+def callback():
+    """LINE PlatformからのWebhookを受け取るエンドポイント"""
+    # X-Line-Signatureヘッダーの検証
+    signature = request.headers.get('X-Line-Signature')
+    body = request.get_data(as_text=True)
+
+    app.logger.info("Request body: " + body)
+
+    try:
+        handler.handle(body, signature)
+    except InvalidSignatureError:
+        logger.warning("Invalid signature. Please check your channel access token/channel secret.")
+        abort(400)
+
+    return 'OK'
+
+@handler.add(MessageEvent, message=TextMessage)
+def handle_message(event):
+    text = event.message.text
+    
+    # InstagramのURLが含まれているかチェック
+    if "instagram.com/p/" in text or "instagram.com/reel/" in text:
+        try:
+            # ユーザーに確認メッセージを送る（UX向上）や既読をつける等の処理も可能だが
+            # ここでは直接APIを叩いて結果を返す
+            
+            # --- RapidAPI呼び出しロジック ---
+            url = f"https://{RAPID_API_HOST}/index"
+            querystring = {"url": text}
+            headers = {
+                "X-RapidAPI-Key": RAPID_API_KEY,
+                "X-RapidAPI-Host": RAPID_API_HOST
+            }
+
+            logger.info(f"Fetching media from RapidAPI for URL: {text}")
+            response = requests.get(url, headers=headers, params=querystring)
+            response.raise_for_status()
+            
+            data = response.json()
+            logger.info(f"RapidAPI Response: {data}")
+
+            # --- レスポンス解析 (APIの仕様に合わせて調整してください) ---
+            # APIによってレスポンス構造が異なります。
+            # 例1: {"media": "https://..."}
+            # 例2: [{"url": "https://..."}]
+            # 例3: {"results": [{"url": "https://..."}]}
+            
+            media_url = None
+            preview_url = None
+            is_video = False
+
+            # 以下は一般的な構造を想定した探索ロジックです
+            if isinstance(data, dict):
+                if 'media' in data:
+                    media_url = data['media']
+                elif 'download_url' in data:
+                    media_url = data['download_url']
+                elif 'results' in data and isinstance(data['results'], list) and data['results']:
+                    media_url = data['results'][0].get('url')
+            elif isinstance(data, list) and len(data) > 0:
+                media_url = data[0].get('url')
+
+            # メディアURLが見つからなかった場合
+            if not media_url:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    TextSendMessage(text="メディアURLを取得できませんでした😢")
+                )
+                return
+
+            # 動画か画像かの判定（簡易的）
+            if ".mp4" in media_url:
+                is_video = True
+            
+            # プレビュー画像のURL（動画の場合は必須）
+            # APIがサムネイルを返さない場合は、適当な画像か動画URLそのものを指定（LINE仕様による）
+            preview_url = data.get('thumbnail') or media_url 
+            if is_video and not data.get('thumbnail'):
+                 # 動画の場合、プレビューに動画URLを指定しても表示されない場合があるため
+                 # 本来はサムネイルが必要だが、今回は簡易的に設定
+                 preview_url = "https://via.placeholder.com/1024x1024?text=Video"
+
+            # --- LINEへの返信 ---
+            if is_video:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    VideoSendMessage(
+                        original_content_url=media_url,
+                        preview_image_url=preview_url # 動画にはプレビュー画像必須
                     )
+                )
+            else:
+                line_bot_api.reply_message(
+                    event.reply_token,
+                    ImageSendMessage(
+                        original_content_url=media_url,
+                        preview_image_url=media_url
+                    )
+                )
+                
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text="エラーが発生しました🙇‍♂️\nAPI制限または予期せぬエラーです。")
+            )
+    else:
+        # インスタのURL以外は無視、またはヘルプメッセージを返す
+        pass
 
-                    if not images:
-                        st.warning("画像が見つからなかった…動画のみかも？")
-                    else:
-                        st.success(f"{len(images)}枚の画像を見つけたよ✨")
-                        st.divider() # 区切り線
-                        
-                        # 画像をループ表示
-                        for img_file in images:
-                            img_path = os.path.join(target_dir, img_file)
-                            st.image(img_path, use_container_width=True)
-                            st.write("") 
-                            st.write("")
-
-            except Exception as e:
-                error_msg = str(e)
-                # エラーハンドリング
-                if "401 Unauthorized" in error_msg or "wait a few minutes" in error_msg:
-                    st.warning("Instagramのアクセス制限がかかっちゃったみたい☕️\n\n短時間にたくさんアクセスすると一時的にブロックされることがあるよ。\n5〜10分くらいゆっくり休んでから、また試してみてね！")
-                elif "404 Not Found" in error_msg:
-                    st.error("投稿が見つからなかったよ🥺 URLが合ってるか、鍵垢じゃないか確認してみて。")
-                elif "Login required" in error_msg:
-                     st.warning("ログインが必要な投稿みたい🔒\n非公開アカウントや、一部の投稿はログインしないと見れない仕様だよ。")
-                else:
-                    st.error(f"エラーが発生しちゃった: {error_msg}")
+if __name__ == "__main__":
+    # ローカルでのテスト用
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
