@@ -93,7 +93,8 @@ def handle_message(event):
 
                     # パターンB: キー名探索
                     # 'url' は投稿ページ自体のURLが入っていることがあるので優先度を下げる
-                    for key in ['video_url', 'download_url', 'media', 'url']:
+                    # サムネイル系のキー（thumbnail, cover, thumb）も対象に追加
+                    for key in ['video_url', 'download_url', 'media', 'thumbnail', 'cover', 'thumb', 'url']:
                         if key in obj and isinstance(obj[key], str) and obj[key].startswith('http'):
                             # ★重要: Instagramの投稿URLそのもの（HTML）は除外する
                             if "instagram.com/p/" in obj[key] or "instagram.com/reel/" in obj[key]:
@@ -127,14 +128,21 @@ def handle_message(event):
                 is_video = True
             
             # プレビュー画像のURL
-            # json内からサムネイルを探す、なければプレースホルダー
+            # json内からサムネイルを探す
+            # 抽出関数を再利用するが、今回は thumbnail キーなどを優先した辞書を渡すアプローチではなく
+            # データ全体から thumbnail キーを探させる（find_urlが改良されたので直接探せる）
             preview_url = find_url({k: v for k, v in data.items() if 'thumb' in k or 'cover' in k})
+            
+            # それでもなければ、data直下のthumbnailを明示的にチェック（RapidAPIのよくあるパターン）
+            if not preview_url and isinstance(data, dict):
+                preview_url = data.get('thumbnail')
+
             if not preview_url:
-                # 動画の場合はメディアURLをそのまま使ってみる（LINEが自動取得してくれることに期待）
-                # ※本来は静止画URL必須
+                # プレビューがない場合
+                # 動画ならプレースホルダー、画像ならオリジナル（サイズオーバーのリスクありだがやむなし）
                  preview_url = "https://via.placeholder.com/1024x1024.png?text=No+Preview" if is_video else media_url
 
-            logger.info(f"Extracted Media URL: {media_url}")
+            logger.info(f"Sending Message -> Original: {media_url}, Preview: {preview_url}")
 
             # --- LINEへの返信 ---
             if is_video:
