@@ -58,6 +58,7 @@ exec gunicorn --bind 0.0.0.0:$PORT run_line:app
 PaaS (Render) の無料枠における「Web Serviceは1つしか起動できない」という制約を突破するため、コンテナのエントリーポイントをハックし、単一コンテナ内でWebサーバーとBotプロセスを並列稼働させるアーキテクチャを採用しました。
 
 Render (Web Service) Container
+```
 ┌──────────────────────────────────────────────┐
 │  entrypoint: start.sh                        │
 │                                              │
@@ -71,6 +72,7 @@ Render (Web Service) Container
 │       │  (常駐プロセスとしてバックグラウンド起動)   │
 │       └─ core/logic.py (共通ロジック)          │
 └──────────────────────────────────────────────┘
+```
 
 ## セットアップとデプロイ
 
