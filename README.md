@@ -54,6 +54,24 @@ python -u run_discord.py &
 exec gunicorn --bind 0.0.0.0:$PORT run_line:app
 ```
 
+## アーキテクチャについて (The "Free Tier" Hack)
+PaaS (Render) の無料枠における「Web Serviceは1つしか起動できない」という制約を突破するため、コンテナのエントリーポイントをハックし、単一コンテナ内でWebサーバーとBotプロセスを並列稼働させるアーキテクチャを採用しました。
+
+Render (Web Service) Container
+┌──────────────────────────────────────────────┐
+│  entrypoint: start.sh                        │
+│                                              │
+│  [Process 1: Foreground]                     │
+│  🌊 Gunicorn (Flask / LINE Bot)              │ <--- HTTP Request (Keep Alive)
+│       │  (Webサーバーとしてポート待受)           │
+│       └─ core/logic.py (共通ロジック)          │
+│                                              │
+│  [Process 2: Background (&)]                 │
+│  🤖 python run_discord.py (Discord Bot)      │ <--- WebSocket (Gateway)
+│       │  (常駐プロセスとしてバックグラウンド起動)   │
+│       └─ core/logic.py (共通ロジック)          │
+└──────────────────────────────────────────────┘
+
 ## セットアップとデプロイ
 
 ### 必須環境変数 (.env)
