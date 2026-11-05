@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from core.logic import process_instagram_url
+from core.logic import fetch_instagram_media, failure_message, process_instagram_url
 
 
 def _mock_response(json_data=None, json_error=None):
@@ -196,3 +196,98 @@ class TestObservabilityLogs:
 
         assert result is None
         assert "stage=url_detect result=not_found" in caplog.text
+
+
+class TestFetchInstagramMedia:
+    """fetch_instagram_media の結果ステータスと失敗理由（Issue #3）。"""
+
+    URL = "https://www.instagram.com/p/TEST123/"
+
+    def test_no_url_status(self):
+        with patch("core.logic.requests.get") as mock_get:
+            outcome = fetch_instagram_media("Hello, no link here")
+        assert outcome == {"status": "no_url"}
+        mock_get.assert_not_called()
+
+    def test_missing_api_key_reason(self):
+        with patch("core.logic.RAPID_API_KEY", None), \
+                patch("core.logic.requests.get") as mock_get:
+            outcome = fetch_instagram_media(self.URL)
+        assert outcome["status"] == "failed"
+        assert outcome["reason"] == "api_key_missing"
+        mock_get.assert_not_called()
+
+    @patch("core.logic.requests.get")
+    def test_ok_status_wraps_result(self, mock_get, mock_instagram_response):
+        mock_get.return_value = _mock_response(mock_instagram_response)
+        outcome = fetch_instagram_media(self.URL)
+        assert outcome["status"] == "ok"
+        assert outcome["result"]["media_count"] == 1
+
+    @patch("core.logic.requests.get")
+    def test_http_error_reason_and_status(self, mock_get):
+        mock_response = _mock_response()
+        mock_response.status_code = 500
+        mock_response.raise_for_status.side_effect = requests.HTTPError("500")
+        mock_get.return_value = mock_response
+        outcome = fetch_instagram_media(self.URL)
+        assert outcome == {"status": "failed", "reason": "http_error", "http_status": 500}
+
+    @patch("core.logic.requests.get")
+    def test_timeout_reason(self, mock_get):
+        mock_get.side_effect = requests.Timeout("timed out")
+        outcome = fetch_instagram_media(self.URL)
+        assert outcome["status"] == "failed"
+        assert outcome["reason"] == "timeout"
+
+    @patch("core.logic.requests.get")
+    def test_request_error_reason(self, mock_get):
+        mock_get.side_effect = requests.ConnectionError("boom")
+        outcome = fetch_instagram_media(self.URL)
+        assert outcome["status"] == "failed"
+        assert outcome["reason"] == "request_error"
+
+    @patch("core.logic.requests.get")
+    def test_parse_error_reason(self, mock_get):
+        mock_get.return_value = _mock_response(json_error=ValueError("bad json"))
+        outcome = fetch_instagram_media(self.URL)
+        assert outcome["status"] == "failed"
+        assert outcome["reason"] == "parse_error"
+
+    @patch("core.logic.requests.get")
+    def test_no_media_reason(self, mock_get):
+        mock_get.return_value = _mock_response({"status": "ok"})
+        outcome = fetch_instagram_media(self.URL)
+        assert outcome["status"] == "failed"
+        assert outcome["reason"] == "no_media"
+
+    @patch("core.logic.requests.get")
+    def test_extract_error_reason(self, mock_get, mock_instagram_response):
+        mock_get.return_value = _mock_response(mock_instagram_response)
+        with patch("core.logic._extract_media_info", side_effect=RuntimeError("weird shape")):
+            outcome = fetch_instagram_media(self.URL)
+        assert outcome["status"] == "failed"
+        assert outcome["reason"] == "extract_error"
+
+
+class TestFailureMessage:
+    """failure_message の出し分け（Issue #3）。"""
+
+    def test_http_error_mentions_possible_restriction_without_asserting(self):
+        text = failure_message("http_error")
+        assert "取得できませんでした" in text
+        assert "制限されている投稿の可能性" in text
+
+    def test_timeout_suggests_retry(self):
+        text = failure_message("timeout")
+        assert "一時的な問題の可能性" in text
+        assert "もう一度" in text
+
+    def test_request_error_uses_same_transient_wording(self):
+        assert failure_message("request_error") == failure_message("timeout")
+
+    def test_other_reasons_use_generic_wording(self):
+        for reason in ("no_media", "parse_error", "extract_error", "api_key_missing", None):
+            text = failure_message(reason)
+            assert "取得できませんでした" in text
+            assert "可能性" not in text

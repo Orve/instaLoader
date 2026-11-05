@@ -139,7 +139,7 @@ def _extract_media_info(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     
     return media_list
 
-def process_instagram_url(text: str, request_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def fetch_instagram_media(text: str, request_id: Optional[str] = None) -> Dict[str, Any]:
     """
     テキスト内のInstagram URLを検出し、RapidAPIを使用してメディア情報を取得する。
     複数メディア（カルーセル投稿）に対応。
@@ -151,9 +151,15 @@ def process_instagram_url(text: str, request_id: Optional[str] = None) -> Option
     Args:
         text (str): ユーザーからの入力テキスト
         request_id (str): Webhook から追跡するためのリクエストID（任意）
-        
+
     Returns:
-        Optional[Dict[str, Any]]: 取得成功時は以下の辞書を返す。失敗時またはURLが含まれない場合はNone。
+        Dict[str, Any]: 処理結果を表す辞書。いずれの形式でも例外は送出しない。
+            成功時: {"status": "ok", "result": {メディア情報の辞書}}
+            URLが含まれない場合: {"status": "no_url"}
+            取得失敗時: {"status": "failed", "reason": <理由>, "http_status": <int|None>}
+                理由は api_key_missing / timeout / request_error / http_error /
+                parse_error / no_media / extract_error のいずれか。
+            成功時の result の構造:
             {
                 "type": "single" | "carousel",  # 投稿タイプ
                 "media_count": int,              # メディア数
@@ -176,13 +182,13 @@ def process_instagram_url(text: str, request_id: Optional[str] = None) -> Option
     # --- 段階1: URL検出 ---
     if "instagram.com/p/" not in text and "instagram.com/reel/" not in text:
         logger.info("rid=%s stage=url_detect result=not_found", rid)
-        return None
+        return {"status": "no_url"}
     logger.info("rid=%s stage=url_detect result=ok shortcode=%s", rid, shortcode)
 
     # --- 段階2: 設定確認 ---
     if not RAPID_API_KEY:
         logger.error("rid=%s stage=config result=error reason=api_key_missing", rid)
-        return None
+        return {"status": "failed", "reason": "api_key_missing", "http_status": None}
 
     # --- 段階3: RapidAPI 通信 ---
     url = f"https://{RAPID_API_HOST}/download"
@@ -201,14 +207,14 @@ def process_instagram_url(text: str, request_id: Optional[str] = None) -> Option
             "rid=%s stage=api result=timeout elapsed_ms=%d timeout_s=%s shortcode=%s",
             rid, elapsed_ms, RAPID_API_TIMEOUT, shortcode,
         )
-        return None
+        return {"status": "failed", "reason": "timeout", "http_status": None}
     except requests.RequestException as e:
         elapsed_ms = int((time.monotonic() - started) * 1000)
         logger.error(
             "rid=%s stage=api result=request_error error_type=%s elapsed_ms=%d shortcode=%s",
             rid, type(e).__name__, elapsed_ms, shortcode,
         )
-        return None
+        return {"status": "failed", "reason": "request_error", "http_status": None}
 
     elapsed_ms = int((time.monotonic() - started) * 1000)
     try:
@@ -218,7 +224,7 @@ def process_instagram_url(text: str, request_id: Optional[str] = None) -> Option
             "rid=%s stage=api result=http_error status=%s elapsed_ms=%d shortcode=%s",
             rid, response.status_code, elapsed_ms, shortcode,
         )
-        return None
+        return {"status": "failed", "reason": "http_error", "http_status": response.status_code}
     logger.info(
         "rid=%s stage=api result=ok status=%s elapsed_ms=%d shortcode=%s",
         rid, response.status_code, elapsed_ms, shortcode,
@@ -231,7 +237,7 @@ def process_instagram_url(text: str, request_id: Optional[str] = None) -> Option
         data = response.json()
     except ValueError:
         logger.error("rid=%s stage=parse result=json_error shortcode=%s", rid, shortcode)
-        return None
+        return {"status": "failed", "reason": "parse_error", "http_status": response.status_code}
 
     top_keys = sorted(data.keys()) if isinstance(data, dict) else [f"<{type(data).__name__}>"]
     logger.info("rid=%s stage=parse result=ok top_keys=%s", rid, ",".join(top_keys))
@@ -246,14 +252,14 @@ def process_instagram_url(text: str, request_id: Optional[str] = None) -> Option
             "rid=%s stage=extract result=error error_type=%s shortcode=%s",
             rid, type(e).__name__, shortcode,
         )
-        return None
+        return {"status": "failed", "reason": "extract_error", "http_status": response.status_code}
 
     if not media_list:
         logger.error(
             "rid=%s stage=extract result=no_media top_keys=%s shortcode=%s",
             rid, ",".join(top_keys), shortcode,
         )
-        return None
+        return {"status": "failed", "reason": "no_media", "http_status": response.status_code}
 
     media_types = [m["type"] for m in media_list]
     logger.info(
@@ -276,4 +282,37 @@ def process_instagram_url(text: str, request_id: Optional[str] = None) -> Option
     # 従来のtypeフィールド（最初のメディアのタイプ）
     result["media_type"] = first_media["type"]
 
-    return result
+    return {"status": "ok", "result": result}
+
+
+def process_instagram_url(text: str, request_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """
+    後方互換用のラッパー。成功時はメディア情報の辞書、失敗時・URLなしの場合は None を返す。
+
+    失敗理由の区別が必要な呼び出し側は fetch_instagram_media を使うこと。
+    """
+    outcome = fetch_instagram_media(text, request_id=request_id)
+    if outcome.get("status") == "ok":
+        return outcome["result"]
+    return None
+
+
+def failure_message(reason: Optional[str]) -> str:
+    """
+    取得失敗を利用者へ伝える文言を、失敗理由に応じて返す（LINE / Discord 共通）。
+
+    理由を断定しすぎない文言にする。特に http_error は、準センシティブ帯
+    （外部参照が制限されている投稿）で観測された応答だが、一般的な上流障害でも
+    起こり得るため「可能性」として伝える。
+    """
+    if reason == "http_error":
+        return (
+            "この投稿は取得できませんでした🙏\n"
+            "Instagram側で外部からの取得が制限されている投稿の可能性があります。"
+        )
+    if reason in ("timeout", "request_error"):
+        return (
+            "取得に失敗しました🙇‍♂️\n"
+            "一時的な問題の可能性があります。少し時間をおいて、もう一度送ってみてください。"
+        )
+    return "この投稿は取得できませんでした🙏"

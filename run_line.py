@@ -10,7 +10,7 @@ from linebot.models import (
 )
 
 from core.config import LINE_CHANNEL_ACCESS_TOKEN, LINE_CHANNEL_SECRET
-from core.logic import process_instagram_url
+from core.logic import fetch_instagram_media, failure_message
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
@@ -158,7 +158,33 @@ def handle_message(event):
     logger.info("rid=%s stage=handle result=start", request_id)
 
     # 共通ロジックを使用してInstagramの情報を取得
-    result = process_instagram_url(text, request_id=request_id)
+    outcome = fetch_instagram_media(text, request_id=request_id)
+
+    if outcome.get("status") == "no_url":
+        # InstagramのURLを含まない通常メッセージには反応しない（現行仕様を維持）
+        logger.info("rid=%s stage=reply result=skipped reason=no_url", request_id)
+        return
+
+    if outcome.get("status") == "failed":
+        # 取得失敗を利用者へ伝える（#3）。文言は理由に応じて core.logic 側で選ぶ
+        reason = outcome.get("reason")
+        logger.info(
+            "rid=%s stage=reply result=failure_notice reason=%s",
+            request_id, reason,
+        )
+        try:
+            line_bot_api.reply_message(
+                event.reply_token,
+                TextSendMessage(text=failure_message(reason)),
+            )
+        except Exception as e:
+            logger.error(
+                "rid=%s stage=reply result=error error_type=%s",
+                request_id, type(e).__name__,
+            )
+        return
+
+    result = outcome.get("result")
 
     if result:
         try:
@@ -193,10 +219,8 @@ def handle_message(event):
                 TextSendMessage(text="エラーが発生しました🙇‍♂️\n送信中に問題が発生しました。")
             )
     else:
-        # InstagramのURLでない、または取得に失敗した場合は何もしない
-        # (取得失敗時にエラーメッセージを送る仕様にする場合はここでTextSendMessageを送る)
-        # どちらの理由で止まったかは core.logic 側の段階ログ（rid一致）で判別できる
-        logger.info("rid=%s stage=reply result=skipped reason=fetch_failed_or_no_url", request_id)
+        # status=ok だが結果が空という想定外の形。呼び出し側は落とさず記録だけ残す
+        logger.info("rid=%s stage=reply result=skipped reason=empty_result", request_id)
 
 if __name__ == "__main__":
     # ローカルでのテスト用
