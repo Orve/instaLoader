@@ -1,12 +1,24 @@
 import logging
+import re
+import time
+
 import requests
-import json
 from typing import Optional, Dict, Any, Union, List
 
-from core.config import RAPID_API_KEY, RAPID_API_HOST
+from core.config import RAPID_API_KEY, RAPID_API_HOST, RAPID_API_TIMEOUT
 
 # ログ設定
 logger = logging.getLogger(__name__)
+
+# 投稿ID（shortcode）の抽出用。ログには URL 全体ではなく shortcode のみを残す
+# （クエリ付き URL には共有用トークン等が含まれ得るため）。
+_SHORTCODE_RE = re.compile(r"instagram\.com/(?:p|reel)/([A-Za-z0-9_-]+)")
+
+
+def _extract_shortcode(text: str) -> Optional[str]:
+    """テキスト中の Instagram 投稿 URL から shortcode を取り出す。"""
+    match = _SHORTCODE_RE.search(text)
+    return match.group(1) if match else None
 
 def _find_all_urls(obj: Union[Dict[str, Any], List[Any]], collected_urls: Optional[List[str]] = None) -> List[str]:
     """
@@ -127,13 +139,18 @@ def _extract_media_info(data: Dict[str, Any]) -> List[Dict[str, Any]]:
     
     return media_list
 
-def process_instagram_url(text: str) -> Optional[Dict[str, Any]]:
+def process_instagram_url(text: str, request_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     テキスト内のInstagram URLを検出し、RapidAPIを使用してメディア情報を取得する。
     複数メディア（カルーセル投稿）に対応。
-    
+
+    ログは段階別（url_detect / config / api / parse / extract）に、
+    request_id（rid）と shortcode のみで記録する。URL 全体・レスポンス本文・
+    署名付きメディア URL はログに残さない。
+
     Args:
         text (str): ユーザーからの入力テキスト
+        request_id (str): Webhook から追跡するためのリクエストID（任意）
         
     Returns:
         Optional[Dict[str, Any]]: 取得成功時は以下の辞書を返す。失敗時またはURLが含まれない場合はNone。
@@ -153,57 +170,110 @@ def process_instagram_url(text: str) -> Optional[Dict[str, Any]]:
                 "preview_url": str      # 最初のプレビューURL
             }
     """
-    # InstagramのURLが含まれているかチェック
+    rid = request_id or "-"
+    shortcode = _extract_shortcode(text)
+
+    # --- 段階1: URL検出 ---
     if "instagram.com/p/" not in text and "instagram.com/reel/" not in text:
+        logger.info("rid=%s stage=url_detect result=not_found", rid)
         return None
+    logger.info("rid=%s stage=url_detect result=ok shortcode=%s", rid, shortcode)
 
+    # --- 段階2: 設定確認 ---
     if not RAPID_API_KEY:
-        logger.error("RAPID_API_KEY is not set.")
+        logger.error("rid=%s stage=config result=error reason=api_key_missing", rid)
         return None
 
+    # --- 段階3: RapidAPI 通信 ---
+    url = f"https://{RAPID_API_HOST}/download"
+    querystring = {"url": text}
+    headers = {
+        "X-RapidAPI-Key": RAPID_API_KEY,
+        "X-RapidAPI-Host": RAPID_API_HOST
+    }
+
+    started = time.monotonic()
     try:
-        # --- RapidAPI呼び出しロジック ---
-        url = f"https://{RAPID_API_HOST}/download"
-        querystring = {"url": text}
-        headers = {
-            "X-RapidAPI-Key": RAPID_API_KEY,
-            "X-RapidAPI-Host": RAPID_API_HOST
-        }
-
-        logger.info(f"Fetching media from RapidAPI for URL: {text}")
-        response = requests.get(url, headers=headers, params=querystring)
-        response.raise_for_status()
-        
-        data = response.json()
-        logger.info(f"RapidAPI Response: {json.dumps(data, ensure_ascii=False)[:500]}...")  # 最初の500文字のみログ
-
-        # --- メディア情報の抽出 ---
-        media_list = _extract_media_info(data)
-        
-        if not media_list:
-            logger.error(f"No media URLs found in response")
-            return None
-        
-        # 結果の構築
-        result: Dict[str, Any] = {
-            "type": "carousel" if len(media_list) > 1 else "single",
-            "media_count": len(media_list),
-            "media_list": media_list
-        }
-        
-        # 後方互換性のため、最初のメディアの情報も含める
-        first_media = media_list[0]
-        result["media_url"] = first_media["url"]
-        result["preview_url"] = first_media["thumbnail"] or first_media["url"]
-        
-        # 従来のtypeフィールド（最初のメディアのタイプ）
-        result["media_type"] = first_media["type"]
-        
-        logger.info(f"Extracted {len(media_list)} media items from Instagram post")
-        logger.info(f"Media types: {[m['type'] for m in media_list]}")
-        
-        return result
-
-    except Exception as e:
-        logger.error(f"Error in process_instagram_url: {e}")
+        response = requests.get(url, headers=headers, params=querystring, timeout=RAPID_API_TIMEOUT)
+    except requests.Timeout:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.error(
+            "rid=%s stage=api result=timeout elapsed_ms=%d timeout_s=%s shortcode=%s",
+            rid, elapsed_ms, RAPID_API_TIMEOUT, shortcode,
+        )
         return None
+    except requests.RequestException as e:
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        logger.error(
+            "rid=%s stage=api result=request_error error_type=%s elapsed_ms=%d shortcode=%s",
+            rid, type(e).__name__, elapsed_ms, shortcode,
+        )
+        return None
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    try:
+        response.raise_for_status()
+    except requests.HTTPError:
+        logger.error(
+            "rid=%s stage=api result=http_error status=%s elapsed_ms=%d shortcode=%s",
+            rid, response.status_code, elapsed_ms, shortcode,
+        )
+        return None
+    logger.info(
+        "rid=%s stage=api result=ok status=%s elapsed_ms=%d shortcode=%s",
+        rid, response.status_code, elapsed_ms, shortcode,
+    )
+
+    # --- 段階4: レスポンス解析 ---
+    # 本文はログに残さない（署名付きメディア URL が含まれ得るため）。
+    # 代わりにトップレベルのキー名だけを記録する。
+    try:
+        data = response.json()
+    except ValueError:
+        logger.error("rid=%s stage=parse result=json_error shortcode=%s", rid, shortcode)
+        return None
+
+    top_keys = sorted(data.keys()) if isinstance(data, dict) else [f"<{type(data).__name__}>"]
+    logger.info("rid=%s stage=parse result=ok top_keys=%s", rid, ",".join(top_keys))
+
+    # --- 段階5: メディア抽出 ---
+    # 想定外の応答形状でも呼び出し側（Webhook ハンドラ）を落とさないよう、
+    # 抽出時の例外はここで捕捉して失敗として記録する。
+    try:
+        media_list = _extract_media_info(data)
+    except Exception as e:
+        logger.error(
+            "rid=%s stage=extract result=error error_type=%s shortcode=%s",
+            rid, type(e).__name__, shortcode,
+        )
+        return None
+
+    if not media_list:
+        logger.error(
+            "rid=%s stage=extract result=no_media top_keys=%s shortcode=%s",
+            rid, ",".join(top_keys), shortcode,
+        )
+        return None
+
+    media_types = [m["type"] for m in media_list]
+    logger.info(
+        "rid=%s stage=extract result=ok count=%d types=%s shortcode=%s",
+        rid, len(media_list), ",".join(media_types), shortcode,
+    )
+
+    # 結果の構築
+    result: Dict[str, Any] = {
+        "type": "carousel" if len(media_list) > 1 else "single",
+        "media_count": len(media_list),
+        "media_list": media_list
+    }
+
+    # 後方互換性のため、最初のメディアの情報も含める
+    first_media = media_list[0]
+    result["media_url"] = first_media["url"]
+    result["preview_url"] = first_media["thumbnail"] or first_media["url"]
+
+    # 従来のtypeフィールド（最初のメディアのタイプ）
+    result["media_type"] = first_media["type"]
+
+    return result

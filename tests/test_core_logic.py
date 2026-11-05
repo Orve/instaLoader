@@ -7,6 +7,7 @@
 test_carousel_handling.py が担当する。
 """
 
+import logging
 from unittest.mock import Mock, patch
 
 import requests
@@ -120,3 +121,78 @@ class TestProcessInstagramUrl:
         result = process_instagram_url("https://www.instagram.com/p/TEST123/")
 
         assert result is None
+
+
+class TestObservabilityLogs:
+    """段階別ログ（Issue #2）: 失敗段階がログから判別できること。"""
+
+    URL = "https://www.instagram.com/p/TEST123/"
+
+    def test_timeout_is_distinguished_and_timeout_is_set(self, caplog):
+        """タイムアウトは HTTP エラーと区別され、timeout 引数も渡る。"""
+        with patch("core.logic.requests.get", side_effect=requests.Timeout("slow")) as mock_get:
+            with caplog.at_level(logging.INFO, logger="core.logic"):
+                result = process_instagram_url(self.URL, request_id="rid-timeout")
+
+        assert result is None
+        assert mock_get.call_args.kwargs["timeout"] > 0
+        assert "rid=rid-timeout stage=api result=timeout" in caplog.text
+
+    def test_http_error_logs_status_code(self, caplog):
+        mock_response = _mock_response({})
+        mock_response.status_code = 403
+        mock_response.raise_for_status.side_effect = requests.HTTPError("403")
+        with patch("core.logic.requests.get", return_value=mock_response):
+            with caplog.at_level(logging.INFO, logger="core.logic"):
+                result = process_instagram_url(self.URL, request_id="rid-http")
+
+        assert result is None
+        assert "stage=api result=http_error status=403" in caplog.text
+
+    def test_json_error_is_logged_as_parse_stage(self, caplog):
+        with patch(
+            "core.logic.requests.get",
+            return_value=_mock_response(json_error=ValueError("bad json")),
+        ):
+            with caplog.at_level(logging.INFO, logger="core.logic"):
+                result = process_instagram_url(self.URL)
+
+        assert result is None
+        assert "stage=parse result=json_error" in caplog.text
+
+    def test_no_media_logs_top_level_keys(self, caplog):
+        """メディア無しの200では、本文ではなくトップレベルのキー名だけが残る。"""
+        with patch(
+            "core.logic.requests.get",
+            return_value=_mock_response({"status": "fail", "error": "not found"}),
+        ):
+            with caplog.at_level(logging.INFO, logger="core.logic"):
+                result = process_instagram_url(self.URL)
+
+        assert result is None
+        assert "stage=extract result=no_media" in caplog.text
+        assert "top_keys=error,status" in caplog.text
+        assert "not found" not in caplog.text
+
+    def test_success_logs_do_not_leak_media_url(self, caplog):
+        """成功時ログにも署名付きメディア URL や本文を含めない。"""
+        signed = "https://cdn.example.com/image.jpg?sig=SECRET_SIGNATURE"
+        with patch(
+            "core.logic.requests.get",
+            return_value=_mock_response({"medias": [{"url": signed}]}),
+        ):
+            with caplog.at_level(logging.INFO, logger="core.logic"):
+                result = process_instagram_url(self.URL, request_id="rid-ok")
+
+        assert result is not None
+        assert "stage=api result=ok status=200" in caplog.text
+        assert "stage=extract result=ok count=1" in caplog.text
+        assert "SECRET_SIGNATURE" not in caplog.text
+        assert "cdn.example.com" not in caplog.text
+
+    def test_url_detect_stage_is_logged(self, caplog):
+        with caplog.at_level(logging.INFO, logger="core.logic"):
+            result = process_instagram_url("no url here")
+
+        assert result is None
+        assert "stage=url_detect result=not_found" in caplog.text
