@@ -109,7 +109,10 @@ async def on_message(message: discord.Message):
         try:
             # 同期処理である process_instagram_url を非同期スレッドで実行
             # これにより、API待ち時間中も他のイベント（他ユーザーへの応答など）をブロックしない
-            result = await asyncio.to_thread(process_instagram_url, content)
+            # ログ追跡用に Discord のメッセージIDを request_id として渡す
+            result = await asyncio.to_thread(
+                process_instagram_url, content, request_id=str(message.id)
+            )
             
             if result:
                 logger.info(f"Found {result.get('media_count', 1)} media items for message: {message.id}")

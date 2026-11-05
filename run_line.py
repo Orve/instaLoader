@@ -1,4 +1,6 @@
 import logging
+import uuid
+
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -37,7 +39,9 @@ def callback():
     signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
 
-    app.logger.info("Request body: " + body)
+    # Webhook 本文はログに残さない（ユーザーIDやメッセージ本文が含まれるため）。
+    # 追跡に必要なのはリクエストを受けた事実とサイズだけとする。
+    logger.info("stage=webhook result=received body_bytes=%d", len(body.encode("utf-8")))
 
     try:
         handler.handle(body, signature)
@@ -148,21 +152,28 @@ def handle_message(event):
     複数メディア（カルーセル投稿）に対応。
     """
     text = event.message.text
-    
+
+    # Webhook から共通ロジック、返信までを1つのIDで追跡する
+    request_id = uuid.uuid4().hex[:12]
+    logger.info("rid=%s stage=handle result=start", request_id)
+
     # 共通ロジックを使用してInstagramの情報を取得
-    result = process_instagram_url(text)
-    
+    result = process_instagram_url(text, request_id=request_id)
+
     if result:
         try:
-            logger.info(f"Processing {result.get('media_count', 1)} media items")
-            
             # メッセージオブジェクトの作成
             messages = create_media_messages(result)
-            
+
             if messages:
+                logger.info(
+                    "rid=%s stage=reply result=attempt messages=%d media_count=%d",
+                    request_id, len(messages), result.get('media_count', 1),
+                )
                 # 複数メディアの送信
                 line_bot_api.reply_message(event.reply_token, messages)
-                
+                logger.info("rid=%s stage=reply result=ok", request_id)
+
                 # 5個を超えるメディアがある場合の追加通知
                 if "media_list" in result and len(result["media_list"]) > 5:
                     # Note: reply_tokenは一度しか使えないため、pushメッセージを使用する必要がある
@@ -170,9 +181,13 @@ def handle_message(event):
                     logger.info(f"Total {len(result['media_list'])} media found, but only first 5 can be sent due to LINE limitation")
             else:
                 raise Exception("No messages created")
-                
+
         except Exception as e:
-            logger.error(f"Error sending message: {e}")
+            # 取得は成功しているため、ここでの失敗は配信側の失敗として区別する
+            logger.error(
+                "rid=%s stage=reply result=error error_type=%s",
+                request_id, type(e).__name__,
+            )
             line_bot_api.reply_message(
                 event.reply_token,
                 TextSendMessage(text="エラーが発生しました🙇‍♂️\n送信中に問題が発生しました。")
@@ -180,7 +195,8 @@ def handle_message(event):
     else:
         # InstagramのURLでない、または取得に失敗した場合は何もしない
         # (取得失敗時にエラーメッセージを送る仕様にする場合はここでTextSendMessageを送る)
-        pass
+        # どちらの理由で止まったかは core.logic 側の段階ログ（rid一致）で判別できる
+        logger.info("rid=%s stage=reply result=skipped reason=fetch_failed_or_no_url", request_id)
 
 if __name__ == "__main__":
     # ローカルでのテスト用

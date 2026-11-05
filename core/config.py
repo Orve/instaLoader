@@ -21,3 +21,11 @@ RAPID_API_HOST: str = os.environ.get(
     'RAPID_API_HOST',
     'instagram-downloader-download-instagram-videos-stories.p.rapidapi.com'
 )
+
+# RapidAPI リクエストのタイムアウト（秒）。未設定・不正値の場合はデフォルト10秒。
+# gunicorn のデフォルト timeout（30秒）より短くし、ワーカーごと止まる前に
+# タイムアウトとして検出できるようにする。
+try:
+    RAPID_API_TIMEOUT: float = float(os.environ.get('RAPID_API_TIMEOUT', '10'))
+except ValueError:
+    RAPID_API_TIMEOUT = 10.0

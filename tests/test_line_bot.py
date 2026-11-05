@@ -6,6 +6,7 @@
 取得失敗時に無言になるのは現行仕様であり、その変更は #3 で扱う。
 """
 
+import logging
 from unittest.mock import Mock, patch
 
 from linebot.exceptions import InvalidSignatureError
@@ -156,3 +157,55 @@ class TestCallback:
         client = run_line.app.test_client()
         response = client.get("/")
         assert response.status_code == 200
+
+    def test_callback_does_not_log_request_body(self, caplog):
+        """Webhook 本文（ユーザーIDやメッセージ本文）はログに残さない。"""
+        client = run_line.app.test_client()
+        body = '{"events":[{"source":{"userId":"U_SECRET"},"message":{"text":"SECRET_BODY_MARKER"}}]}'
+        with patch.object(run_line.handler, "handle", return_value=None):
+            with caplog.at_level(logging.INFO):
+                response = client.post(
+                    "/callback",
+                    data=body,
+                    headers={"X-Line-Signature": "dummy", "Content-Type": "application/json"},
+                )
+        assert response.status_code == 200
+        assert "SECRET_BODY_MARKER" not in caplog.text
+        assert "U_SECRET" not in caplog.text
+
+
+class TestHandleMessageObservability:
+    """handle_message の request_id 伝播と段階ログ（Issue #2）。"""
+
+    @patch("run_line.line_bot_api")
+    @patch("run_line.process_instagram_url")
+    def test_request_id_is_passed_to_logic(self, mock_process, mock_api):
+        mock_process.return_value = _single_result("image")
+
+        run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
+
+        request_id = mock_process.call_args.kwargs.get("request_id")
+        assert isinstance(request_id, str) and request_id
+
+    @patch("run_line.line_bot_api")
+    @patch("run_line.process_instagram_url")
+    def test_fetch_failure_is_logged_as_skipped(self, mock_process, mock_api, caplog):
+        """取得失敗は配信失敗と区別できる形でログに残る。"""
+        mock_process.return_value = None
+
+        with caplog.at_level(logging.INFO, logger="run_line"):
+            run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
+
+        assert "stage=reply result=skipped" in caplog.text
+
+    @patch("run_line.line_bot_api")
+    @patch("run_line.process_instagram_url")
+    def test_send_failure_is_logged_as_reply_error(self, mock_process, mock_api, caplog):
+        """取得成功後の送信失敗は stage=reply のエラーとして残る。"""
+        mock_process.return_value = _single_result("image")
+        mock_api.reply_message.side_effect = [Exception("send failed"), None]
+
+        with caplog.at_level(logging.INFO, logger="run_line"):
+            run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
+
+        assert "stage=reply result=error" in caplog.text
