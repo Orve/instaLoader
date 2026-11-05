@@ -1,130 +1,122 @@
-"""Tests for core Instagram media extraction logic."""
+"""Tests for core Instagram media extraction logic.
 
-import pytest
-from unittest.mock import Mock, patch, MagicMock
-from core.logic import MediaExtractor
+現行実装は関数ベース（process_instagram_url）であり、かつてテストが前提に
+していた MediaExtractor クラスは存在しない。本ファイルは現行の公開関数に
+対して、URL検出・API通信・レスポンス解析の各段階を検証する。
+メディア抽出ヘルパー（_find_all_urls / _extract_media_info）の詳細は
+test_carousel_handling.py が担当する。
+"""
+
+from unittest.mock import Mock, patch
+
+import requests
+
+from core.logic import process_instagram_url
 
 
-class TestMediaExtractor:
-    """Test suite for MediaExtractor class."""
+def _mock_response(json_data=None, json_error=None):
+    """requests.get の戻り値モックを作る。"""
+    mock_response = Mock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status.return_value = None
+    if json_error is not None:
+        mock_response.json.side_effect = json_error
+    else:
+        mock_response.json.return_value = json_data if json_data is not None else {}
+    return mock_response
 
-    def setup_method(self):
-        """Setup test fixtures."""
-        self.api_key = "test_api_key"
-        self.api_host = "test_api_host"
-        self.extractor = MediaExtractor(self.api_key, self.api_host)
 
-    def test_extract_shortcode_from_url(self):
-        """Test shortcode extraction from various Instagram URLs."""
-        test_cases = [
-            ("https://www.instagram.com/p/ABC123/", "ABC123"),
-            ("http://instagram.com/p/XYZ789/", "XYZ789"),
-            ("https://www.instagram.com/p/TEST123/?utm_source=test", "TEST123"),
-            ("https://www.instagram.com/reel/REEL456/", "REEL456"),
-        ]
-        
-        for url, expected_shortcode in test_cases:
-            shortcode = self.extractor._extract_shortcode(url)
-            assert shortcode == expected_shortcode, f"Failed for URL: {url}"
+class TestProcessInstagramUrl:
+    """process_instagram_url の振る舞い。"""
 
-    def test_extract_shortcode_invalid_url(self):
-        """Test shortcode extraction with invalid URLs."""
-        invalid_urls = [
-            "https://www.google.com",
-            "not_a_url",
-            "https://instagram.com/username/",
-            "",
-            None,
-        ]
-        
-        for url in invalid_urls:
-            shortcode = self.extractor._extract_shortcode(url)
-            assert shortcode is None, f"Should return None for: {url}"
+    def test_non_instagram_text_returns_none_without_api_call(self):
+        """Instagram URL を含まないテキストでは API を叩かず None。"""
+        with patch("core.logic.requests.get") as mock_get:
+            result = process_instagram_url("Hello, this is a test message")
+        assert result is None
+        mock_get.assert_not_called()
 
-    @patch('requests.get')
-    def test_fetch_media_success(self, mock_get):
-        """Test successful media fetching."""
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "data": {
-                "media_type": 1,
-                "image_versions": {
-                    "items": [
-                        {"url": "https://example.com/image.jpg"}
-                    ]
-                }
-            }
-        }
+    def test_missing_api_key_returns_none(self):
+        """RAPID_API_KEY 未設定時は None（API は叩かない）。"""
+        with patch("core.logic.RAPID_API_KEY", None), \
+                patch("core.logic.requests.get") as mock_get:
+            result = process_instagram_url("https://www.instagram.com/p/TEST123/")
+        assert result is None
+        mock_get.assert_not_called()
+
+    @patch("core.logic.requests.get")
+    def test_success_single_image(self, mock_get, mock_instagram_response):
+        """単一画像の成功レスポンスを結果辞書に変換する。"""
+        mock_get.return_value = _mock_response(mock_instagram_response)
+
+        result = process_instagram_url("https://www.instagram.com/p/TEST123/")
+
+        assert result is not None
+        assert result["type"] == "single"
+        assert result["media_count"] == 1
+        assert result["media_url"] == "https://example.com/image1.jpg"
+        assert result["media_type"] == "image"
+        assert result["preview_url"] == "https://example.com/image1.jpg"
+
+    @patch("core.logic.requests.get")
+    def test_success_video_uses_thumbnail_as_preview(self, mock_get, mock_video_response):
+        """動画は video_url を使い、プレビューにはサムネイルを使う。"""
+        mock_get.return_value = _mock_response(mock_video_response)
+
+        result = process_instagram_url("https://www.instagram.com/reel/VIDEO123/")
+
+        assert result is not None
+        assert result["media_url"] == "https://example.com/video.mp4"
+        assert result["media_type"] == "video"
+        assert result["preview_url"] == "https://example.com/thumbnail.jpg"
+
+    @patch("core.logic.requests.get")
+    def test_request_passes_url_text_and_host_header(self, mock_get):
+        """API には入力テキストが url パラメータとして渡る（現行の契約）。"""
+        mock_get.return_value = _mock_response({"medias": [{"url": "https://example.com/a.jpg"}]})
+        text = "https://www.instagram.com/p/TEST123/"
+
+        process_instagram_url(text)
+
+        _, kwargs = mock_get.call_args
+        assert kwargs["params"] == {"url": text}
+        assert kwargs["headers"]["X-RapidAPI-Host"] == "test_api_host"
+        assert kwargs["headers"]["X-RapidAPI-Key"] == "test_api_key"
+
+    @patch("core.logic.requests.get")
+    def test_http_error_returns_none(self, mock_get):
+        """HTTP エラー（raise_for_status が例外）では None。"""
+        mock_response = _mock_response({"medias": []})
+        mock_response.raise_for_status.side_effect = requests.HTTPError("404 Not Found")
         mock_get.return_value = mock_response
-        
-        url = "https://www.instagram.com/p/TEST123/"
-        result = self.extractor.fetch_media(url)
-        
-        assert result["success"] is True
-        assert "media_urls" in result
-        assert len(result["media_urls"]) > 0
 
-    @patch('requests.get')
-    def test_fetch_media_api_error(self, mock_get):
-        """Test media fetching with API error."""
-        mock_response = Mock()
-        mock_response.status_code = 404
-        mock_response.text = "Not found"
-        mock_get.return_value = mock_response
-        
-        url = "https://www.instagram.com/p/NOTFOUND/"
-        result = self.extractor.fetch_media(url)
-        
-        assert result["success"] is False
-        assert "error" in result
+        result = process_instagram_url("https://www.instagram.com/p/NOTFOUND/")
 
-    @patch('requests.get')
-    def test_fetch_media_network_error(self, mock_get):
-        """Test media fetching with network error."""
-        mock_get.side_effect = Exception("Network error")
-        
-        url = "https://www.instagram.com/p/TEST123/"
-        result = self.extractor.fetch_media(url)
-        
-        assert result["success"] is False
-        assert "error" in result
-        assert "Network error" in result["error"]
+        assert result is None
 
+    @patch("core.logic.requests.get")
+    def test_timeout_returns_none(self, mock_get):
+        """タイムアウト等の通信例外では None。"""
+        mock_get.side_effect = requests.Timeout("timed out")
 
-class TestMediaTypeDetection:
-    """Test suite for media type detection."""
+        result = process_instagram_url("https://www.instagram.com/p/TEST123/")
 
-    def setup_method(self):
-        """Setup test fixtures."""
-        self.extractor = MediaExtractor("key", "host")
+        assert result is None
 
-    def test_detect_image_type(self):
-        """Test detection of image media type."""
-        media_data = {
-            "media_type": 1,
-            "image_versions": {"items": [{"url": "test.jpg"}]}
-        }
-        media_type = self.extractor._detect_media_type(media_data)
-        assert media_type == "image"
+    @patch("core.logic.requests.get")
+    def test_invalid_json_returns_none(self, mock_get):
+        """JSON として解析できない応答では None。"""
+        mock_get.return_value = _mock_response(json_error=ValueError("No JSON"))
 
-    def test_detect_video_type(self):
-        """Test detection of video media type."""
-        media_data = {
-            "media_type": 2,
-            "video_versions": [{"url": "test.mp4"}]
-        }
-        media_type = self.extractor._detect_media_type(media_data)
-        assert media_type == "video"
+        result = process_instagram_url("https://www.instagram.com/p/TEST123/")
 
-    def test_detect_carousel_type(self):
-        """Test detection of carousel media type."""
-        media_data = {
-            "media_type": 8,
-            "carousel_media": [
-                {"image_versions": {"items": [{"url": "test1.jpg"}]}},
-                {"video_versions": [{"url": "test2.mp4"}]}
-            ]
-        }
-        media_type = self.extractor._detect_media_type(media_data)
-        assert media_type == "carousel"
+        assert result is None
+
+    @patch("core.logic.requests.get")
+    def test_response_without_media_returns_none(self, mock_get):
+        """メディアが抽出できない応答（空辞書）では None。"""
+        mock_get.return_value = _mock_response({})
+
+        result = process_instagram_url("https://www.instagram.com/p/TEST123/")
+
+        assert result is None
