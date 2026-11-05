@@ -4,7 +4,7 @@ import logging
 from typing import Optional, List
 
 from core.config import DISCORD_BOT_TOKEN
-from core.logic import process_instagram_url
+from core.logic import fetch_instagram_media, failure_message
 
 # ログ設定
 logging.basicConfig(level=logging.INFO)
@@ -107,26 +107,28 @@ async def on_message(message: discord.Message):
     # タイピング表示を開始（処理中であることを示す）
     async with message.channel.typing():
         try:
-            # 同期処理である process_instagram_url を非同期スレッドで実行
+            # 同期処理である fetch_instagram_media を非同期スレッドで実行
             # これにより、API待ち時間中も他のイベント（他ユーザーへの応答など）をブロックしない
             # ログ追跡用に Discord のメッセージIDを request_id として渡す
-            result = await asyncio.to_thread(
-                process_instagram_url, content, request_id=str(message.id)
+            outcome = await asyncio.to_thread(
+                fetch_instagram_media, content, request_id=str(message.id)
             )
-            
-            if result:
+
+            if outcome.get("status") == "ok":
+                result = outcome["result"]
                 logger.info(f"Found {result.get('media_count', 1)} media items for message: {message.id}")
-                
+
                 # メディアの送信
                 await send_media_embeds(message, result)
-            else:
-                # メディアが取得できなかった場合
+            elif outcome.get("status") == "failed":
+                # 取得失敗を利用者へ伝える（#3）。文言は理由に応じて core.logic 側で選ぶ
                 error_embed = discord.Embed(
                     title="❌ エラー",
-                    description="メディアの取得に失敗しました。URLを確認してください。",
+                    description=failure_message(outcome.get("reason")),
                     color=discord.Color.red()
                 )
                 await message.reply(embed=error_embed)
+            # status == "no_url" の場合は事前チェックで到達しない想定。到達しても何もしない
                 
         except Exception as e:
             logger.error(f"Error in on_message: {e}")

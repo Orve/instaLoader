@@ -69,7 +69,7 @@ class TestOnMessage:
         # client.user はログイン前は None になり得るため、代役の都合ではなく
         # 「author が client.user と同一」を直接作る
         message.author = run_discord.client.user
-        with patch("run_discord.process_instagram_url") as mock_process:
+        with patch("run_discord.fetch_instagram_media") as mock_process:
             asyncio.run(run_discord.on_message(message))
         mock_process.assert_not_called()
         message.reply.assert_not_called()
@@ -77,7 +77,7 @@ class TestOnMessage:
     def test_ignore_non_instagram_message(self):
         """Instagram URL を含まないメッセージは処理しない。"""
         message = _FakeMessage("Just a regular message")
-        with patch("run_discord.process_instagram_url") as mock_process:
+        with patch("run_discord.fetch_instagram_media") as mock_process:
             asyncio.run(run_discord.on_message(message))
         mock_process.assert_not_called()
         message.reply.assert_not_called()
@@ -85,7 +85,7 @@ class TestOnMessage:
     def test_reply_image_embed_on_success(self):
         """単一画像の成功時は画像 Embed で返信する。"""
         message = _FakeMessage("https://www.instagram.com/p/TEST123/")
-        with patch("run_discord.process_instagram_url", return_value=_result([_IMAGE])):
+        with patch("run_discord.fetch_instagram_media", return_value={"status": "ok", "result": _result([_IMAGE])}):
             asyncio.run(run_discord.on_message(message))
 
         message.reply.assert_called_once()
@@ -96,27 +96,30 @@ class TestOnMessage:
     def test_reply_video_url_on_success(self):
         """単一動画の成功時は URL をそのまま返信する。"""
         message = _FakeMessage("https://www.instagram.com/reel/VIDEO123/")
-        with patch("run_discord.process_instagram_url", return_value=_result([_VIDEO])):
+        with patch("run_discord.fetch_instagram_media", return_value={"status": "ok", "result": _result([_VIDEO])}):
             asyncio.run(run_discord.on_message(message))
 
         message.reply.assert_called_once()
         assert message.reply.call_args.kwargs["content"] == "https://example.com/video.mp4"
 
     def test_error_embed_on_failure(self):
-        """取得失敗（None）時は ❌ エラー Embed で返信する。"""
+        """取得失敗時は ❌ エラー Embed に理由に応じた文言を入れて返信する（#3）。"""
         message = _FakeMessage("https://www.instagram.com/p/TEST123/")
-        with patch("run_discord.process_instagram_url", return_value=None):
+        outcome = {"status": "failed", "reason": "http_error", "http_status": 500}
+        with patch("run_discord.fetch_instagram_media", return_value=outcome):
             asyncio.run(run_discord.on_message(message))
 
         message.reply.assert_called_once()
         embed = message.reply.call_args.kwargs["embed"]
         assert "エラー" in embed.title
+        assert "取得できませんでした" in embed.description
+        assert "制限されている投稿の可能性" in embed.description
 
     def test_error_embed_on_exception(self):
         """処理中の例外時は ⚠️ エラー Embed で返信する。"""
         message = _FakeMessage("https://www.instagram.com/p/TEST123/")
         with patch(
-            "run_discord.process_instagram_url", side_effect=Exception("Network error")
+            "run_discord.fetch_instagram_media", side_effect=Exception("Network error")
         ):
             asyncio.run(run_discord.on_message(message))
 

@@ -104,9 +104,9 @@ class TestHandleMessage:
     """handle_message の返信分岐。"""
 
     @patch("run_line.line_bot_api")
-    @patch("run_line.process_instagram_url")
+    @patch("run_line.fetch_instagram_media")
     def test_reply_on_success(self, mock_process, mock_api):
-        mock_process.return_value = _single_result("image")
+        mock_process.return_value = {"status": "ok", "result": _single_result("image")}
 
         run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
 
@@ -116,20 +116,36 @@ class TestHandleMessage:
         assert isinstance(messages[0], ImageSendMessage)
 
     @patch("run_line.line_bot_api")
-    @patch("run_line.process_instagram_url")
-    def test_no_reply_on_failure(self, mock_process, mock_api):
-        """取得失敗時は現行仕様として何も返信しない（#3 で変更予定）。"""
-        mock_process.return_value = None
+    @patch("run_line.fetch_instagram_media")
+    def test_no_reply_when_no_url(self, mock_process, mock_api):
+        """Instagram URL を含まない通常メッセージには反応しない（現行仕様を維持）。"""
+        mock_process.return_value = {"status": "no_url"}
 
-        run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
+        run_line.handle_message(_text_event("こんにちは"))
 
         mock_api.reply_message.assert_not_called()
 
     @patch("run_line.line_bot_api")
-    @patch("run_line.process_instagram_url")
+    @patch("run_line.fetch_instagram_media")
+    def test_failure_reply_on_fetch_failure(self, mock_process, mock_api):
+        """取得失敗時は失敗を伝えるテキストを返す（#3）。"""
+        mock_process.return_value = {
+            "status": "failed", "reason": "http_error", "http_status": 500,
+        }
+
+        run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
+
+        mock_api.reply_message.assert_called_once()
+        _, messages = mock_api.reply_message.call_args[0]
+        assert isinstance(messages, TextSendMessage)
+        assert "取得できませんでした" in messages.text
+        assert "制限されている投稿の可能性" in messages.text
+
+    @patch("run_line.line_bot_api")
+    @patch("run_line.fetch_instagram_media")
     def test_error_text_on_send_failure(self, mock_process, mock_api):
         """送信に失敗したらエラーテキストでの再返信を試みる。"""
-        mock_process.return_value = _single_result("image")
+        mock_process.return_value = {"status": "ok", "result": _single_result("image")}
         mock_api.reply_message.side_effect = [Exception("send failed"), None]
 
         run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
@@ -178,9 +194,9 @@ class TestHandleMessageObservability:
     """handle_message の request_id 伝播と段階ログ（Issue #2）。"""
 
     @patch("run_line.line_bot_api")
-    @patch("run_line.process_instagram_url")
+    @patch("run_line.fetch_instagram_media")
     def test_request_id_is_passed_to_logic(self, mock_process, mock_api):
-        mock_process.return_value = _single_result("image")
+        mock_process.return_value = {"status": "ok", "result": _single_result("image")}
 
         run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
 
@@ -188,21 +204,34 @@ class TestHandleMessageObservability:
         assert isinstance(request_id, str) and request_id
 
     @patch("run_line.line_bot_api")
-    @patch("run_line.process_instagram_url")
-    def test_fetch_failure_is_logged_as_skipped(self, mock_process, mock_api, caplog):
-        """取得失敗は配信失敗と区別できる形でログに残る。"""
-        mock_process.return_value = None
+    @patch("run_line.fetch_instagram_media")
+    def test_no_url_is_logged_as_skipped(self, mock_process, mock_api, caplog):
+        """URLなしは無言で終わり、その旨がログに残る。"""
+        mock_process.return_value = {"status": "no_url"}
+
+        with caplog.at_level(logging.INFO, logger="run_line"):
+            run_line.handle_message(_text_event("こんにちは"))
+
+        assert "stage=reply result=skipped reason=no_url" in caplog.text
+
+    @patch("run_line.line_bot_api")
+    @patch("run_line.fetch_instagram_media")
+    def test_fetch_failure_is_logged_as_failure_notice(self, mock_process, mock_api, caplog):
+        """取得失敗は「失敗を通知した」ことが理由付きでログに残る（#3）。"""
+        mock_process.return_value = {
+            "status": "failed", "reason": "http_error", "http_status": 500,
+        }
 
         with caplog.at_level(logging.INFO, logger="run_line"):
             run_line.handle_message(_text_event("https://www.instagram.com/p/TEST123/"))
 
-        assert "stage=reply result=skipped" in caplog.text
+        assert "stage=reply result=failure_notice reason=http_error" in caplog.text
 
     @patch("run_line.line_bot_api")
-    @patch("run_line.process_instagram_url")
+    @patch("run_line.fetch_instagram_media")
     def test_send_failure_is_logged_as_reply_error(self, mock_process, mock_api, caplog):
         """取得成功後の送信失敗は stage=reply のエラーとして残る。"""
-        mock_process.return_value = _single_result("image")
+        mock_process.return_value = {"status": "ok", "result": _single_result("image")}
         mock_api.reply_message.side_effect = [Exception("send failed"), None]
 
         with caplog.at_level(logging.INFO, logger="run_line"):
